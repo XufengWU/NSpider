@@ -1,0 +1,2 @@
+# NSpider
+Python spider framework
