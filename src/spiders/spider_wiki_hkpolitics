@@ -1,0 +1,162 @@
+# -*- coding:utf-8 -*-
+
+import breadth_spider
+import requests
+from pyquery import PyQuery as pq
+import regex
+import json
+import threading
+import codecs
+
+try:
+    import xml.etree.cElementTree as et
+except ImportError:
+    import xml.etree.ElementTree as et
+
+zh_wiki_prefix = 'https://zh.wikipedia.org'
+
+
+class HKPoliticsWikiSpider(breadth_spider.BreadthSpider):
+    output_file_lock = threading.Lock()
+    output_file_cat = 'category.json'
+    output_file_page = 'page.json'
+
+    def __init__(self, name='HKPiliticsWikiSpider', seed_urls=set(), MAX_DEPTH=1, THREAD_NUM=1):
+        breadth_spider.BreadthSpider.__init__(self)
+        self.name = name
+        self.logger_con = self.get_console_logger('logger_con_hkpolitics_wiki')
+        self.logger_file = self.get_file_logger('logger_file_hkpolitics_wiki', 'hkpolitics_wiki.log')
+        self.MAX_DEPTH = MAX_DEPTH
+        self.THREAD_NUM = THREAD_NUM
+        self.task_types_dict = {}
+        self.DEFAULT_TASK_TYPE = 'page'
+        self.Task.default_task_type = self.DEFAULT_TASK_TYPE
+        self.RESPONSE_TIMEOUT_VALUE = 20
+        self.FETCH_DELAY = 0
+        self.RETRY_TIMES = 3
+        self.seeds = self.create_seed_tasks(seed_urls)
+
+    class Task:
+
+        def __init__(self, url, type):
+            self.url = url
+            self.type = type
+
+    def create_seed_tasks(self, seed_urls):
+        tasks = []
+        for url in seed_urls:
+            tasks.append(self.create_task(url))
+        return tasks
+
+    def create_task(self, url):
+        if url.find('/Category:') >= 0:
+            return self.Task(url, 'cat')
+        else:
+            return self.Task(url, 'page')
+
+    def get_response(self, task):
+        return requests.get(task.url)
+
+    def get_filtered_urls(self, task, response):
+        d = pq(response.text)
+        urls = []
+        if task.type == 'cat':
+            for item in d('.CategoryTreeLabel').items():
+                urls.append(zh_wiki_prefix + item.attr('href'))
+            for item in d('#mw-pages .mw-category-group a').items():
+                urls.append(
+                    'https://zh.wikipedia.org/w/api.php?action=query&prop=categories|revisions&rvprop=content&format=xml&rvsection=0&rvparse' + '&titles=' + item.text())
+        elif task.type == 'page':
+            for c in d('categories cl').items():
+                cat = regex.sub(r'Category\:', '', c.attr('title'))
+                urls.append('https://zh.wikipedia.org/wiki/Category:' + cat)
+        return urls
+
+    def item_filter(self, task, response):
+        return True
+
+    def already_solved_task(self, task, response):
+        return False
+
+    def solve(self, task, response):
+        if task.type == 'cat':
+            d = pq(response.text)
+            key = d('#firstHeading').text()
+            key = regex.sub(ur'Category\:|分類:|分类:', '', key)
+            cat_item = {'sub_cat': [], 'pages': []}
+            print 'sub cats of ' + key
+            c_str = ''
+            for c in d('.CategoryTreeLabel').items():
+                c_str += c.text() + ', '
+                cat_item['sub_cat'].append(c.text())
+            print 'pages of ' + key
+            p_str = ''
+            for p in d('#mw-pages .mw-category-group a').items():
+                if not regex.findall(r'Template\:|User\:', p.text()):
+                    p_str += p.text() + ', '
+                    cat_item['pages'].append(p.text())
+            with self.output_file_lock:
+                cat_dict = {}
+                with codecs.open(self.output_file_cat, 'r', encoding='utf-8') as fr:
+                    try:
+                        cat_dict = json.load(fr)
+                    except:
+                        print 'e!'
+                        print cat_dict
+                    fr.close()
+                with codecs.open(self.output_file_cat, 'w', encoding='utf-8') as fw:
+                    if key not in cat_dict:
+                        cat_dict[key] = cat_item
+                        try:
+                            json.dump(cat_dict, fw)
+                        except:
+                            print 'error'
+                            print cat_item
+                    fw.close()
+        elif task.type == 'page':
+            d = pq(response.text)
+            key = d('page').attr('title')
+            print 'page solve ' + key
+            page_item = {'extra_tags': [], 'categories': []}
+            for c in d('categories cl').items():
+                page_item['categories'].append(regex.sub(r'Category\:', '', c.attr('title')))
+            rev = d('revisions rev')
+            info_box = pq(rev.text())('table.infobox')
+            for tr in info_box('tr').items():
+                k = tr('th').text()
+                v = tr('td').text()
+                if k and v:
+                    page_item[k] = v
+                else:
+                    if k:
+                        page_item['extra_tags'].append(k)
+                    elif v:
+                        page_item['extra_tags'].append(v)
+            with self.output_file_lock:
+                page_dict = {}
+                with codecs.open(self.output_file_page, 'r', encoding='utf-8') as fr:
+                    try:
+                        page_dict = json.load(fr)
+                    except:
+                        print 'e!'
+                        print page_dict
+                    fr.close()
+                with codecs.open(self.output_file_page, 'w', encoding='utf-8') as fw:
+                    if key not in page_dict:
+                        page_dict[key] = page_item
+                        try:
+                            json.dump(page_dict, fw)
+                        except:
+                            print 'error'
+                            print page_item
+                    fw.close()
+
+    def mark_solved(self, task):
+        pass
+
+
+if __name__ == '__main__':
+    hkpolitics_wiki_spider = HKPoliticsWikiSpider(
+        seed_urls={'https://zh.wikipedia.org/wiki/Category:香港政治人物'},
+        THREAD_NUM=15, MAX_DEPTH=2)
+    hkpolitics_wiki_spider.start()
